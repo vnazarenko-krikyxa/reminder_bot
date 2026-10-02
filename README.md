@@ -20,3 +20,6 @@ Groq (Whisper + gpt-oss) для голосу й розбору фраз, Google 
 | `ua_holidays.py` | свята України (зокрема Великдень) |
 | `work.py` | листи про відсутність і шаблони |
 | `meetings.py`, `google_api.py`, `google_auth.py` | зустрічі, Gmail/Calendar, одноразова авторизація Google |
+
+## Ліцензія
+[MIT](LICENSE) — можна вільно використовувати й змінювати, зберігаючи згадку автора.
