@@ -1,0 +1,16 @@
+.env
+*.db
+__pycache__/
+state.pickle
+run.lock
+venv/
+cron.log
+google_client*.json
+directory.json
+*.bak*
+cron.log*
+
+# на всякий случай: любые локальные env-файлы, кроме примера
+.env.*
+!.env.example
+*.sqlite*
