@@ -134,3 +134,39 @@ class Weekdays(unittest.TestCase):
         self.assertEqual(r["date"], "2026-10-06")                        # сьогоднішній день — через тиждень
         r = ai.fix_weekday({"action": "agenda", "date": "2026-09-29", "date_to": None}, "що у вівторок", now)
         self.assertEqual(r["date"], "2026-09-29")                        # день тижня збігся — не чіпаємо
+
+
+class Rollover(unittest.TestCase):
+    def setUp(self):
+        if os.path.exists(os.environ["DB_PATH"]):
+            os.remove(os.environ["DB_PATH"])
+        db.init()
+        self.today = datetime.now(TZ).date()
+
+    def test_unfinished_task_moves_to_today(self):
+        past = self.today - timedelta(days=3)
+        db.add_event(7, "Зняти відео", past.day, past.month, past.year, "once", 0, 0, None, past,
+                     time="10:00", kind="task")
+        occ = db.active_occurrences()[0]
+        db.mark_sent(occ["id"], "at")
+        db.sync_occurrences(self.today)
+        occ = db.active_occurrences()[0]
+        self.assertEqual((occ["date"], occ["rolled"]), (self.today.isoformat(), 1))
+        self.assertEqual(db.sent_keys(occ["id"]), {})                       # старі надсилання стерто
+        self.assertEqual(len(db.list_events(7)), 1)                          # не пропала зі списків
+        self.assertEqual(decide(occ, at(self.today, 10, 30), {}), "d0")     # зранку, без старого часу
+        self.assertIsNone(decide(occ, at(self.today, 9, 0), {}))
+
+    def test_snoozed_to_future_is_not_moved(self):
+        past = self.today - timedelta(days=2)
+        db.add_event(7, "Купити стрічку", past.day, past.month, past.year, "once", 0, 0, None, past, kind="task")
+        occ = db.active_occurrences()[0]
+        db.update_occurrence(occ["id"], snoozed_until=(datetime.now(TZ) + timedelta(days=3)).isoformat())
+        db.sync_occurrences(self.today)
+        self.assertEqual(db.active_occurrences()[0]["date"], past.isoformat())
+
+    def test_birthdays_are_not_rolled(self):
+        past = self.today - timedelta(days=3)
+        db.add_event(7, "ДР брата", past.day, past.month, None, "yearly", 1, 1, None, past, kind="birthday")
+        db.sync_occurrences(self.today)
+        self.assertTrue(all(o["rolled"] == 0 for o in db.active_occurrences()))

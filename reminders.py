@@ -17,9 +17,14 @@ PRE_HOURS = 2  # за сколько часов до события со вре�
 
 ICONS = {"birthday": "🎉", "anniversary": "💞", "holiday": "🎊", "task": "📌", "event": "🎫", "wish": "🌠"}
 SNOOZE = {"snz30": ("30 хв", timedelta(minutes=30)), "snz120": ("2 год", timedelta(hours=2)),
-          "snzw": ("тиждень", timedelta(days=7)), "snzm": ("місяць", None)}
+          "snztm": ("Завтра", None), "snzw": ("тиждень", timedelta(days=7))}
+OLD_SNOOZE = ("snooze", "snz60", "snzm")  # кнопки в старих повідомленнях — ще обробляємо
 # Ключи «сегодняшних» напоминаний: после них, если никак не отреагировал, бот повторяет
 REPEATABLE = ("d0", "at")
+
+
+def rolled(occ) -> bool:
+    return bool(occ["rolled"]) if "rolled" in occ.keys() else False
 
 
 def cap(s: str) -> str:
@@ -82,7 +87,8 @@ def decide(occ, now: datetime, sent):
         # повторное уже ушло — дальше обычное расписание, но в этот день только вечернее / точное
         snoozed_today = until.date() == today
 
-    at = event_at(occ, now.tzinfo)
+    # перенесена невиконана справа — нагадуємо зранку, без прив'язки до старого часу
+    at = None if rolled(occ) else event_at(occ, now.tzinfo)
     # Для задач со временем не шлём «через N дней», если N дней назад задачи ещё не было:
     # «завтра в 9 позвонить» не должно сразу превращаться в «Завтра: позвонить».
     lead = (occ_date - utc_to_local(occ["created_at"], now.tzinfo).date()).days if at else None
@@ -159,6 +165,8 @@ def render(occ, today: date, key: str | None = None, extra_lines=(), extra_rows=
         head = f"📅 <b>Через {plural_days(days)}</b>"
     else:
         head = f"📅 <b>{plural_days(days)} тому</b>"
+    if days == 0 and rolled(occ):
+        head = "⏪ <b>Не виконано — нагадую сьогодні</b>"
     if key and key.startswith("rep:"):
         head = "🔁 <b>Нагадую ще раз</b> · " + head
 
@@ -210,6 +218,8 @@ def keyboard(occ, days, extra_rows=()):
 def snooze_until(occ, now: datetime, code: str) -> datetime:
     """Отложить: snz30 / snz120 / snzw (неделя) / snzm (месяц; 31.01 -> 28/29.02)."""
     now = now.replace(second=0, microsecond=0)
+    if code == "snztm":
+        return datetime.combine(now.date() + timedelta(days=1), REMIND_AT, tzinfo=now.tzinfo)
     if code == "snzm":
         y, m = (now.year + 1, 1) if now.month == 12 else (now.year, now.month + 1)
         return now.replace(year=y, month=m, day=min(now.day, calendar.monthrange(y, m)[1]))

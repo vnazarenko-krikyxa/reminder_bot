@@ -27,7 +27,7 @@ from config import (
 )
 from dates import fmt_day_month, occurrence_date, parse_date, plural_days
 from reminders import (
-    SNOOZE, after_morning, cap, decide, done_line, escape, icon, render, snooze_until, snoozed_line,
+    OLD_SNOOZE, SNOOZE, after_morning, cap, decide, done_line, escape, icon, render, snooze_until, snoozed_line,
 )
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
@@ -1223,12 +1223,17 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     today_iso = now().date().isoformat()
     db.update_occurrence(occ["id"], acted_on=today_iso)  # будь-яка реакція — сьогодні більше не повторюємо
-    if action in ("snooze", "snz60") or action in SNOOZE:
+    if action in OLD_SNOOZE or action in SNOOZE:
         until = snooze_until(occ, now(), action)
         db.update_occurrence(occ["id"], snoozed_until=until.isoformat())
         await q.answer(f"⏰ Нагадаю {until:%d.%m} в {until:%H:%M}")
-        await q.edit_message_text(snoozed_line(occ, until), parse_mode=ParseMode.HTML)
+        # у чаті лишаються тільки «Виконано»: відкладене нагадування прибираємо
         await cleanup_msgs(context.bot, occ["id"], keep=q.message.message_id)
+        db.pop_msgs(occ["id"])
+        try:
+            await q.message.delete()
+        except Exception:  # старше 48 год — Telegram не дасть видалити, тоді хоча б згортаємо
+            await q.edit_message_text(snoozed_line(occ, until), parse_mode=ParseMode.HTML)
         return
     ask_gift_for = None
     if action == "gift":
@@ -1434,8 +1439,7 @@ async def send_due(bot):
             continue
         text, kb = render_occ(occ, t.date(), key)
         try:
-            if key.startswith("rep:"):
-                await cleanup_msgs(bot, occ["id"])  # повтор замінює попереднє нагадування, а не додається
+            await cleanup_msgs(bot, occ["id"])  # нове нагадування замінює попереднє, а не додається
             msg = await bot.send_message(occ["chat_id"], text, parse_mode=ParseMode.HTML, reply_markup=kb)
             db.add_msg(occ["id"], occ["chat_id"], msg.message_id)
         except Exception:
@@ -1496,7 +1500,7 @@ def build_app(persistence=None):
     app.add_handler(CommandHandler("today", today_cmd))
     app.add_handler(CommandHandler(["tasks", "wishes", "birthdays", "holidays"], section_cmd))
     app.add_handler(CallbackQueryHandler(
-        on_button, pattern=r"^(gift|congrats|snooze|snz30|snz60|snz120|snzw|snzm|done|skip|del|delok):\d+$|^rg:\d+:\d+$"))
+        on_button, pattern=r"^(gift|congrats|snooze|snz30|snz60|snz120|snztm|snzw|snzm|done|skip|del|delok):\d+$|^rg:\d+:\d+$"))
     app.add_handler(CallbackQueryHandler(on_block_button, pattern=r"^(hbrg:\d+:\d+|hbskip:\d+|dg(gift|congrats|done|snz):\d+)$"))
     app.add_handler(CallbackQueryHandler(on_gift_answer, pattern=r"^gi:\d+:\d+:(\d+|x)$"))
     app.add_handler(CallbackQueryHandler(on_pending, pattern=r"^pend:(save|fix|cancel)$"))

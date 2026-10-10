@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS occurrences (
     congrats_done  INTEGER NOT NULL DEFAULT 0,
     snoozed_until  TEXT,
     acted_on       TEXT,                -- дата последнего нажатия любой кнопки (отменяет повторы в этот день)
+    rolled         INTEGER NOT NULL DEFAULT 0,  -- сколько раз невыполненная справа переносилась на следующий день
     status         TEXT    NOT NULL DEFAULT 'active',  -- active | done | skipped | closed
     UNIQUE (event_id, date)
 );
@@ -120,6 +121,8 @@ def init():
         ocols = {r["name"] for r in c.execute("PRAGMA table_info(occurrences)")}
         if "acted_on" not in ocols:
             c.execute("ALTER TABLE occurrences ADD COLUMN acted_on TEXT")
+        if "rolled" not in ocols:
+            c.execute("ALTER TABLE occurrences ADD COLUMN rolled INTEGER NOT NULL DEFAULT 0")
         # выполненные/пропущенные разовые события сразу убираем из списков
         c.execute("UPDATE events SET archived=1 WHERE recurrence='once' AND archived=0 AND id IN"
                   " (SELECT event_id FROM occurrences WHERE status IN ('done', 'skipped'))")
@@ -259,6 +262,10 @@ def next_date(e, today: date) -> date | None:
     raise ValueError(rec)
 
 
+# Какие события переносятся, если не отмечены (дни рождения/праздники закрываются как раньше)
+ROLLOVER_RECURRENCE = ("once", "weekly", "monthly")
+
+
 def sync_occurrences(today: date):
     """Закрывает прошедшие разы и заводит следующий раз для каждого активного события.
 
@@ -269,6 +276,22 @@ def sync_occurrences(today: date):
     snoozed_future = "(snoozed_until IS NOT NULL AND snoozed_until > ?)"
     now_iso = datetime.now(TZ).isoformat()
     with connect() as c:
+        # Невиконані справи не губляться: якщо дата минула, а «Зроблено» не натиснуто і не відкладено
+        # на майбутнє — переносимо на сьогодні, щоб нагадати зранку (стара історія надсилань стирається)
+        for o in c.execute(
+            f"SELECT o.id, o.event_id FROM occurrences o JOIN events e ON e.id=o.event_id"
+            f" WHERE o.status='active' AND o.date < ? AND NOT {snoozed_future}"
+            f" AND e.archived=0 AND e.recurrence IN ({','.join('?' * len(ROLLOVER_RECURRENCE))})"
+            f" AND COALESCE(e.kind, 'task') IN ('task', 'event')",
+            (today.isoformat(), now_iso, *ROLLOVER_RECURRENCE),
+        ).fetchall():
+            if c.execute("SELECT 1 FROM occurrences WHERE event_id=? AND date=? AND id!=?",
+                         (o["event_id"], today.isoformat(), o["id"])).fetchone():
+                c.execute("UPDATE occurrences SET status='closed' WHERE id=?", (o["id"],))
+                continue
+            c.execute("UPDATE occurrences SET date=?, rolled=rolled+1, snoozed_until=NULL WHERE id=?",
+                      (today.isoformat(), o["id"]))
+            c.execute("DELETE FROM sent_log WHERE occurrence_id=?", (o["id"],))
         # Прошедшие больше суток назад — закрываем (день «вчера» оставляем для «опоздал поздравить?»)
         c.execute(f"UPDATE occurrences SET status='closed' WHERE status='active' AND date < ?"
                   f" AND NOT {snoozed_future}", (yesterday, now_iso))
