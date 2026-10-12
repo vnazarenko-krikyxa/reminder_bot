@@ -18,11 +18,12 @@ from telegram.ext import (
 import ai
 import db
 import google_api
+import llm
 import meetings
 import ua_holidays
 import work
 from config import (
-    ALLOWED_USER_IDS, DIGEST_HOUR, GROQ_API_KEY, MAX_VOICE_SECONDS, REMIND_AT, TELEGRAM_TOKEN, TICK_SECONDS, TZ,
+    ALLOWED_USER_IDS, DIGEST_HOUR, MAX_VOICE_SECONDS, REMIND_AT, TELEGRAM_TOKEN, TICK_SECONDS, TZ,
     WORK_EMAIL_FROM, WORK_EMAIL_TO, WORK_NICK,
 )
 from dates import fmt_day_month, occurrence_date, parse_date, plural_days
@@ -107,24 +108,34 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     db.seed_holidays(chat_id, now().date())
     await update.message.reply_text(HELP, reply_markup=NO_KB)
-    await update.message.reply_text(setup_status(chat_id), parse_mode=ParseMode.HTML,
+    await update.message.reply_text(await setup_status(chat_id), parse_mode=ParseMode.HTML,
                                     disable_web_page_preview=True)
 
 
-NO_GROQ = ("🎙 Голос і вільний текст ще не працюють: у файлі <code>.env</code> бота не заданий "
-           "<code>GROQ_API_KEY</code>.\n"
-           "1. Отримай безкоштовний ключ: https://console.groq.com/keys\n"
-           "2. Впиши в <code>.env</code>: <code>GROQ_API_KEY=…</code>\n"
-           "3. Перезапусти бота.\n"
-           "Поки що можна додавати покроково: /add")
+NO_LLM = ("🎙 Голос і вільний текст ще не працюють: у файлі <code>.env</code> бота не заданий ключ LLM.\n"
+          "1. Візьми ключ будь-якої LLM: Groq (безкоштовно, з голосом) — https://console.groq.com/keys, "
+          "або OpenAI, Anthropic, Gemini, OpenRouter, DeepSeek, Mistral, xAI.\n"
+          "2. Впиши в <code>.env</code>: <code>LLM_API_KEY=…</code> — провайдера бот визначить сам.\n"
+          "3. Перезапусти бота.\n"
+          "Поки що можна додавати покроково: /add")
 
 
-def setup_status(chat_id) -> str:
+async def setup_status(chat_id) -> str:
     """Що налаштовано в цій копії бота — щоб одразу було видно, чого бракує."""
     nick = db.get_setting(chat_id, "nick") or WORK_NICK
-    lines = ["⚙️ <b>Налаштування</b>",
-             ("✅" if GROQ_API_KEY else "❌") + " Голос і вільний текст (Groq)"
-             + ("" if GROQ_API_KEY else " — потрібен <code>GROQ_API_KEY</code> у .env, див. SETUP.md"),
+    if not llm.configured():
+        ai_line = "❌ Голос і вільний текст — потрібен <code>LLM_API_KEY</code> у .env, див. SETUP.md"
+    else:
+        name = await llm.provider()
+        if not name:
+            ai_line = ("⚠️ Ключ LLM задано, але провайдера не розпізнано — вкажи "
+                       "<code>LLM_PROVIDER</code> у .env (groq, openai, anthropic, gemini…)")
+        else:
+            voice = await llm.voice_available()
+            ai_line = (f"✅ Вільний текст: {llm.NAMES.get(name, name)}\n"
+                       + ("✅ Голос" if voice else
+                          "➖ Голос — цей провайдер не розпізнає мову; додай <code>STT_API_KEY</code> (ключ Groq)"))
+    lines = ["⚙️ <b>Налаштування</b>", ai_line,
              ("✅" if google_api.configured() else "➖") + " Робота: листи, «Не на місці», зустрічі (Google)"
              + ("" if google_api.configured() else " — необов'язково, див. SETUP.md"),
              (f"✅ Ник у листах: <b>{escape(nick)}</b>" if nick else "➖ Ник у листах не задано")
@@ -355,8 +366,8 @@ async def free_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     msg = update.message
     chat_id = update.effective_chat.id
-    if not GROQ_API_KEY:
-        await msg.reply_text(NO_GROQ, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    if not llm.configured():
+        await msg.reply_text(NO_LLM, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
         return
     ud = context.user_data
     events = db.events_brief(chat_id)

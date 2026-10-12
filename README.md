@@ -7,7 +7,7 @@ Telegram-бот-нагадувалка з голосовим керування�
 - **[Як запустити свого](SETUP.md)**
 
 Стек: Python 3.11+, [python-telegram-bot](https://python-telegram-bot.org/), SQLite,
-Groq (Whisper + gpt-oss) для голосу й розбору фраз, Google APIs (Gmail, Calendar, People) — за бажанням.
+будь-яка LLM за ключем (Groq, OpenAI, Claude, Gemini, OpenRouter, xAI, DeepSeek, Mistral, свій сервер) для голосу й розбору фраз, Google APIs (Gmail, Calendar, People) — за бажанням.
 
 ## Структура
 | Файл | Що робить |
@@ -16,7 +16,8 @@ Groq (Whisper + gpt-oss) для голосу й розбору фраз, Google 
 | `run_cron.py`, `start.py` | запуск на хостингу з cron (без постійного процесу) |
 | `reminders.py` | коли й що нагадувати, вигляд повідомлень |
 | `db.py` | SQLite: події, повтори, люди, ідеї, подарунки |
-| `ai.py` | Groq: голос → текст, фраза → дія |
+| `ai.py` | фраза → дія (промпти, перевірка відповіді) |
+| `llm.py` | провайдер LLM за ключем, запити, розпізнавання голосу |
 | `ua_holidays.py` | свята України (зокрема Великдень) |
 | `work.py` | листи про відсутність і шаблони |
 | `meetings.py`, `google_api.py`, `google_auth.py` | зустрічі, Gmail/Calendar, одноразова авторизація Google |

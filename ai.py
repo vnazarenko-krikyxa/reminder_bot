@@ -1,4 +1,4 @@
-"""Голос -> текст (Groq Whisper) и текст -> действие со списком событий (Groq LLM)."""
+"""Голос -> текст и текст -> действие со списком событий (любая LLM, см. llm.py)."""
 import asyncio
 import calendar
 import json
@@ -8,19 +8,12 @@ from datetime import date, datetime, timedelta
 
 import httpx
 
-from config import GROQ_API_KEY, GROQ_MODELS, GROQ_STT_MODEL
+import llm
 import meetings
 import work
 from dates import next_yearly, occurrence_date
 
 log = logging.getLogger("reminder_bot.ai")
-API = "https://api.groq.com/openai/v1"
-# Без браузерного UA Cloudflare перед Groq отвечает 403 (error code 1010)
-HEADERS = {
-    "Authorization": f"Bearer {GROQ_API_KEY}",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/128.0 Safari/537.36",
-}
 
 EVENT_RULES = """Событие — JSON-объект:
 {"title": str, "day": int, "month": int, "year": int|null, "time": "HH:MM"|null,
@@ -160,29 +153,12 @@ class AIError(Exception):
     pass
 
 
-def _retry_after(r: httpx.Response) -> float:
-    """Секунды до сброса лимита: retry-after или x-ratelimit-reset-tokens («7.66s», «1m2s»)."""
-    if r.headers.get("retry-after"):
-        try:
-            return float(r.headers["retry-after"])
-        except ValueError:
-            pass
-    m = re.fullmatch(r"(?:(\d+)m)?([\d.]+)s", r.headers.get("x-ratelimit-reset-tokens", ""))
-    return int(m.group(1) or 0) * 60 + float(m.group(2)) if m else 5.0
-
 
 async def transcribe(audio: bytes, filename: str) -> str:
-    async with httpx.AsyncClient(timeout=60) as client:
-        r = await client.post(
-            f"{API}/audio/transcriptions",
-            headers=HEADERS,
-            files={"file": (filename, audio)},
-            data={"model": GROQ_STT_MODEL, "response_format": "json", "temperature": "0"},
-        )
-    if r.status_code != 200:
-        log.error("Groq STT %s: %s", r.status_code, r.text[:300])
-        raise AIError("не вдалося розпізнати голос")
-    return r.json().get("text", "").strip()
+    try:
+        return await llm.transcribe(audio, filename)
+    except (llm.LLMError, httpx.HTTPError) as e:
+        raise AIError(str(e) if isinstance(e, llm.LLMError) else "не вдалося розпізнати голос")
 
 
 WEEKDAYS = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
@@ -276,6 +252,12 @@ async def interpret(text: str, now: datetime, events: dict, target_id: int | Non
         # «зустріч з друзями», «созвон з мамою» — особиста подія, а не робоча зустріч у Google Calendar
         r = await _ask(prompt + "\nЭто личное событие с родными/друзьями, НЕ рабочая встреча: верни action add.",
                        lambda d: validate_action(d, now, events, draft is not None))
+    wd = weekday_in(text)
+    if r["action"] == "error" and wd == now.weekday() and not draft and not partial:
+        # «у понеділок о 10», сказане в понеділок о 12, — це наступний понеділок, а не «вже минуло»
+        nxt = now.date() + timedelta(days=7)
+        r = await _ask(prompt + f"\nНазванный день недели — сегодня, но имеется в виду следующий: {nxt.isoformat()}.",
+                       lambda d: validate_action(d, now, events, draft is not None))
     r = fix_weekday(r, text, now)
     if r["action"] == "agenda" and re.search(r"на (ближайшую |всю )?неделю|на 7 дней", text.lower()):
         # модель путает «на неделю» с «на этой неделе» — считаем 7 дней от сегодня
@@ -284,37 +266,19 @@ async def interpret(text: str, now: datetime, events: dict, target_id: int | Non
 
 
 async def _ask(prompt: str, check):
+    """Питаємо модель (будь-якого провайдера) і перевіряємо JSON; не вийшло — наступна модель."""
     last = None
-    async with httpx.AsyncClient(timeout=40) as client:
-        for model in GROQ_MODELS:
-            for attempt in range(2):
-                r = await client.post(
-                    f"{API}/chat/completions",
-                    headers=HEADERS,
-                    json={
-                        "model": model,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "temperature": 0,
-                        "max_tokens": 1500,
-                        # reasoning-модели иначе могут потратить весь бюджет на рассуждение
-                        "reasoning_effort": "low",
-                        "response_format": {"type": "json_object"},
-                    },
-                )
-                if r.status_code == 429 and attempt == 0:
-                    # лимит токенов в минуту: ждём, сколько просит Groq (но не дольше 20 с)
-                    await asyncio.sleep(min(_retry_after(r), 20))
-                    continue
-                break
-            if r.status_code == 200:
-                content = r.json()["choices"][0]["message"].get("content") or ""
-                try:
-                    return check(json.loads(content))
-                except (ValueError, KeyError, TypeError) as e:
-                    last = f"{model}: {e}"
-                    continue
-            last = f"{model}: HTTP {r.status_code} {r.text[:200]}"
-    log.error("Groq parse failed: %s", last)
+    try:
+        async for content in llm.chat_json(prompt):
+            try:
+                return check(llm.extract_json(content))
+            except (ValueError, KeyError, TypeError) as e:
+                last = str(e)
+    except llm.LLMError as e:
+        raise AIError(str(e))
+    except httpx.HTTPError as e:
+        last = repr(e)
+    log.error("LLM parse failed: %s", last)
     raise AIError("не вдалося розібрати фразу")
 
 

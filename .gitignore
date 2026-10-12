@@ -14,3 +14,4 @@ cron.log*
 .env.*
 !.env.example
 *.sqlite*
+llm_provider.json

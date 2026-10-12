@@ -170,3 +170,19 @@ class Rollover(unittest.TestCase):
         db.add_event(7, "ДР брата", past.day, past.month, None, "yearly", 1, 1, None, past, kind="birthday")
         db.sync_occurrences(self.today)
         self.assertTrue(all(o["rolled"] == 0 for o in db.active_occurrences()))
+
+
+class LLMKeys(unittest.TestCase):
+    def test_guess_provider_by_key(self):
+        import llm
+        self.assertEqual(llm.guess("gsk_abc")[0], "groq")
+        self.assertEqual(llm.guess("sk-ant-api03-x")[0], "anthropic")
+        self.assertEqual(llm.guess("sk-or-v1-x")[0], "openrouter")
+        self.assertEqual(llm.guess("sk-proj-x")[0], "openai")
+        self.assertEqual(llm.guess("AIzaSyX")[0], "gemini")
+        self.assertEqual(llm.guess("sk-legacy"), (None, ["openai", "deepseek"]))   # перевіряється запитом
+
+    def test_extract_json(self):
+        import llm
+        self.assertEqual(llm.extract_json('```json\n{"action": "add"}\n```'), {"action": "add"})
+        self.assertEqual(llm.extract_json('Ось: {"a": 1} — готово'), {"a": 1})

@@ -44,10 +44,14 @@ GIFT_NAG_DAYS = 7
 # Как часто бот проверяет, пора ли что-то отправить (секунды)
 TICK_SECONDS = 60
 
-# Groq: распознавание голоса и разбор фраз в событие
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
-GROQ_STT_MODEL = "whisper-large-v3-turbo"
-GROQ_MODELS = ["openai/gpt-oss-20b", "openai/gpt-oss-120b"]
+# LLM для голосу й розбору фраз: будь-який провайдер, визначається за ключем (див. llm.py).
+# GROQ_API_KEY — стара назва, теж працює.
+LLM_API_KEY = os.environ.get("LLM_API_KEY") or os.environ.get("GROQ_API_KEY", "")
+LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "").strip().lower()   # якщо ключ не розпізнається
+LLM_MODEL = os.environ.get("LLM_MODEL", "").strip()                 # своя модель замість типової
+LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "").strip()           # будь-який OpenAI-сумісний сервер
+# Окремий ключ для розпізнавання голосу (Groq/OpenAI), якщо основний провайдер його не вміє
+STT_API_KEY = os.environ.get("STT_API_KEY", "").strip()
 MAX_VOICE_SECONDS = 120
 
 # Отсутствие на работе: письмо команде + «Не на місці» в Google Calendar (см. google_auth.py)
