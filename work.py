@@ -71,7 +71,8 @@ def compose(a: dict) -> dict:
         start, end = at(d1, f"{FULL_DAY[0]:%H:%M}"), at(d2, f"{FULL_DAY[1]:%H:%M}")
     else:
         raise ValueError(f"неизвестный тип {kind!r}")
-    fields = {"nick": WORK_NICK, "date": ua_date(d1), "dates": ua_range(d1, d2), "from": t_from, "to": t_to}
+    # ник: свій у боті (/nick) -> з .env (WORK_NICK)
+    fields = {"nick": a.get("nick") or WORK_NICK, "date": ua_date(d1), "dates": ua_range(d1, d2), "from": t_from, "to": t_to}
     subject, body = (t.format(**fields) for t in TEMPLATES[kind])
     subject = subject.lstrip(" /")  # без ніка — тема без «/» на початку
     if kind in ("day_off", "sick"):

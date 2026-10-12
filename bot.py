@@ -23,7 +23,7 @@ import ua_holidays
 import work
 from config import (
     ALLOWED_USER_IDS, DIGEST_HOUR, GROQ_API_KEY, MAX_VOICE_SECONDS, REMIND_AT, TELEGRAM_TOKEN, TICK_SECONDS, TZ,
-    WORK_EMAIL_FROM, WORK_EMAIL_TO,
+    WORK_EMAIL_FROM, WORK_EMAIL_TO, WORK_NICK,
 )
 from dates import fmt_day_month, occurrence_date, parse_date, plural_days
 from reminders import (
@@ -53,9 +53,10 @@ COMMANDS = [
     ("all", "Змінити чи видалити подію"),
     ("add", "Додати подію покроково"),
     ("cancel", "Скасувати введення"),
+    ("nick", "Мій ник для робочих листів"),
     ("help", "Що вміє бот"),
 ]
-COMMANDS_VERSION = "cmds:v1"  # змінити, щоб бот оновив меню в Telegram
+COMMANDS_VERSION = "cmds:v2"  # змінити, щоб бот оновив меню в Telegram
 # Кнопки внизу чату прибрано — розділи в меню команд «/». Старі натискання ще обробляємо.
 NO_KB = ReplyKeyboardRemove()
 
@@ -78,6 +79,7 @@ HELP = (
     "/all — змінити чи видалити подію\n"
     "/add — додати подію покроково\n"
     "/cancel — скасувати введення\n"
+    "/nick ТвійНік — ник на початку теми робочих листів\n"
     "/help — ця довідка\n\n"
     "Нагадую о 10:30. Що треба зробити сьогодні — повторю ще раз через 2 год (до 3 разів), "
     "а о 20:00 надішлю підсумок невідміченого."
@@ -102,8 +104,50 @@ def when_text(n: dict) -> str:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not allowed(update):
         return
-    db.seed_holidays(update.effective_chat.id, now().date())
+    chat_id = update.effective_chat.id
+    db.seed_holidays(chat_id, now().date())
     await update.message.reply_text(HELP, reply_markup=NO_KB)
+    await update.message.reply_text(setup_status(chat_id), parse_mode=ParseMode.HTML,
+                                    disable_web_page_preview=True)
+
+
+NO_GROQ = ("🎙 Голос і вільний текст ще не працюють: у файлі <code>.env</code> бота не заданий "
+           "<code>GROQ_API_KEY</code>.\n"
+           "1. Отримай безкоштовний ключ: https://console.groq.com/keys\n"
+           "2. Впиши в <code>.env</code>: <code>GROQ_API_KEY=…</code>\n"
+           "3. Перезапусти бота.\n"
+           "Поки що можна додавати покроково: /add")
+
+
+def setup_status(chat_id) -> str:
+    """Що налаштовано в цій копії бота — щоб одразу було видно, чого бракує."""
+    nick = db.get_setting(chat_id, "nick") or WORK_NICK
+    lines = ["⚙️ <b>Налаштування</b>",
+             ("✅" if GROQ_API_KEY else "❌") + " Голос і вільний текст (Groq)"
+             + ("" if GROQ_API_KEY else " — потрібен <code>GROQ_API_KEY</code> у .env, див. SETUP.md"),
+             ("✅" if google_api.configured() else "➖") + " Робота: листи, «Не на місці», зустрічі (Google)"
+             + ("" if google_api.configured() else " — необов'язково, див. SETUP.md"),
+             (f"✅ Ник у листах: <b>{escape(nick)}</b>" if nick else "➖ Ник у листах не задано")
+             + " — змінити: <code>/nick ТвійНік</code>"]
+    return "\n".join(lines)
+
+
+async def nick_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/nick Minato — ник на початку теми робочих листів («Minato / Відгул / 17.10.26»)."""
+    if not allowed(update):
+        return
+    chat_id = update.effective_chat.id
+    if context.args:
+        nick = " ".join(context.args).strip()[:40]
+        db.set_setting(chat_id, "nick", nick)
+        await update.message.reply_text(f"✅ Ник для листів: <b>{escape(nick)}</b>\n"
+                                        f"Тема виглядатиме так: {escape(nick)} / Відгул / 17.10.26",
+                                        parse_mode=ParseMode.HTML)
+        return
+    nick = db.get_setting(chat_id, "nick") or WORK_NICK
+    await update.message.reply_text(
+        (f"Зараз ник: <b>{escape(nick)}</b>. " if nick else "Ник ще не задано. ")
+        + "Щоб змінити: <code>/nick ТвійНік</code>", parse_mode=ParseMode.HTML)
 
 
 # ---------- /add ----------
@@ -312,7 +356,7 @@ async def free_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     chat_id = update.effective_chat.id
     if not GROQ_API_KEY:
-        await msg.reply_text("Вільне введення не налаштоване. /add — додати покроково.")
+        await msg.reply_text(NO_GROQ, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
         return
     ud = context.user_data
     events = db.events_brief(chat_id)
@@ -427,6 +471,8 @@ async def free_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif r["action"] == "person_info":
         await reply(prefix + person_text(chat_id, r["person"]), parse_mode=ParseMode.HTML)
     else:
+        if r["action"] == "absence":
+            r["absence"]["nick"] = db.get_setting(chat_id, "nick")  # свій ник у темі листа
         ud["pending"] = r
         text, kb = pending_card(r, events, heard)
         await reply(text, parse_mode=ParseMode.HTML, reply_markup=kb)
@@ -1498,6 +1544,7 @@ def build_app(persistence=None):
     app.add_handler(CommandHandler("list", list_cmd))
     app.add_handler(CommandHandler("all", all_cmd))
     app.add_handler(CommandHandler("today", today_cmd))
+    app.add_handler(CommandHandler("nick", nick_cmd))
     app.add_handler(CommandHandler(["tasks", "wishes", "birthdays", "holidays"], section_cmd))
     app.add_handler(CallbackQueryHandler(
         on_button, pattern=r"^(gift|congrats|snooze|snz30|snz60|snz120|snztm|snzw|snzm|done|skip|del|delok):\d+$|^rg:\d+:\d+$"))

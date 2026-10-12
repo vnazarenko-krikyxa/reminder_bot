@@ -87,6 +87,12 @@ CREATE TABLE IF NOT EXISTS occ_recipients (     -- галочки «подаро
     done           INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (occurrence_id, person_id)
 );
+CREATE TABLE IF NOT EXISTS settings (           -- налаштування користувача: ник для листів тощо
+    chat_id        INTEGER NOT NULL,
+    key            TEXT    NOT NULL,
+    value          TEXT,
+    PRIMARY KEY (chat_id, key)
+);
 CREATE TABLE IF NOT EXISTS flags (              -- «уже отправлено» для блоков: итог дня, праздники
     key            TEXT PRIMARY KEY,
     created_at     TEXT NOT NULL DEFAULT (datetime('now'))
@@ -535,3 +541,15 @@ def undated_tasks(chat_id) -> list:
         return c.execute(
             "SELECT * FROM events WHERE chat_id=? AND archived=0 AND recurrence='someday'"
             " AND COALESCE(kind, 'task') != 'wish' ORDER BY created_at", (chat_id,)).fetchall()
+
+
+def get_setting(chat_id, key, default=None):
+    with connect() as c:
+        r = c.execute("SELECT value FROM settings WHERE chat_id=? AND key=?", (chat_id, key)).fetchone()
+        return r["value"] if r else default
+
+
+def set_setting(chat_id, key, value):
+    with connect() as c:
+        c.execute("INSERT INTO settings (chat_id, key, value) VALUES (?,?,?)"
+                  " ON CONFLICT(chat_id, key) DO UPDATE SET value=excluded.value", (chat_id, key, value))
