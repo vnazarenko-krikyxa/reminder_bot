@@ -55,9 +55,10 @@ COMMANDS = [
     ("add", "Додати подію покроково"),
     ("cancel", "Скасувати введення"),
     ("nick", "Мій ник для робочих листів"),
+    ("key", "Ключ LLM (замінити)"),
     ("help", "Що вміє бот"),
 ]
-COMMANDS_VERSION = "cmds:v2"  # змінити, щоб бот оновив меню в Telegram
+COMMANDS_VERSION = "cmds:v3"  # змінити, щоб бот оновив меню в Telegram
 # Кнопки внизу чату прибрано — розділи в меню команд «/». Старі натискання ще обробляємо.
 NO_KB = ReplyKeyboardRemove()
 
@@ -81,6 +82,7 @@ HELP = (
     "/add — додати подію покроково\n"
     "/cancel — скасувати введення\n"
     "/nick ТвійНік — ник на початку теми робочих листів\n"
+    "/key — ключ LLM (замінити) · /voicekey — ключ Groq для голосу\n"
     "/help — ця довідка\n\n"
     "Нагадую о 10:30. Що треба зробити сьогодні — повторю ще раз через 2 год (до 3 разів), "
     "а о 20:00 надішлю підсумок невідміченого."
@@ -110,13 +112,72 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(HELP, reply_markup=NO_KB)
     await update.message.reply_text(await setup_status(chat_id), parse_mode=ParseMode.HTML,
                                     disable_web_page_preview=True)
+    if not llm.configured():
+        context.user_data["mode"] = "await_key"
+        await update.message.reply_text(ASK_KEY, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
+
+ASK_KEY = ("🔑 <b>Надішли сюди ключ LLM одним повідомленням</b> — я сам визначу провайдера, перевірю ключ, "
+           "збережу його й видалю твоє повідомлення з чату.\n\n"
+           "Немає ключа? Найпростіше — безкоштовний Groq (вміє й голос):\n"
+           "1. https://console.groq.com/keys → увійди через Google\n"
+           "2. <b>Create API Key</b> → скопіюй ключ <code>gsk_…</code> і надішли мені.\n\n"
+           "Підходять також ключі OpenAI, Anthropic (Claude), Gemini, OpenRouter, xAI, DeepSeek, Mistral.")
+ASK_VOICE_KEY = ("🎙 Надішли ключ <b>Groq</b> (безкоштовно: https://console.groq.com/keys) або OpenAI — "
+                 "він потрібен лише для розпізнавання голосу. Я перевірю, збережу й видалю повідомлення.")
+
+
+async def key_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/key — замінити ключ LLM; /voicekey — окремий ключ для голосу."""
+    if not allowed(update):
+        return
+    voice = update.message.text.split()[0].lstrip("/").split("@")[0] == "voicekey"
+    if context.args:
+        await handle_key(update, context, context.args[0], "STT_API_KEY" if voice else "LLM_API_KEY")
+        return
+    context.user_data["mode"] = "await_stt" if voice else "await_key"
+    await update.message.reply_text(ASK_VOICE_KEY if voice else ASK_KEY, parse_mode=ParseMode.HTML,
+                                    disable_web_page_preview=True)
+
+
+async def handle_key(update: Update, context: ContextTypes.DEFAULT_TYPE, key: str, var: str):
+    """Перевіряє ключ, зберігає в .env і прибирає повідомлення з ключем із чату."""
+    msg = update.message
+    try:
+        await msg.delete()  # ключ не повинен лишатися в переписці
+    except Exception:
+        pass
+    await context.bot.send_chat_action(msg.chat_id, "typing")
+    name, err = await llm.check_key(key)
+    if err:
+        context.user_data["mode"] = "await_stt" if var == "STT_API_KEY" else "await_key"
+        await context.bot.send_message(msg.chat_id, f"⚠️ {cap(err)}. Надішли інший ключ або /cancel.")
+        return
+    if var == "STT_API_KEY" and not llm.has_voice(name):
+        context.user_data["mode"] = "await_stt"
+        await context.bot.send_message(
+            msg.chat_id, f"⚠️ {llm.NAMES.get(name, name)} не розпізнає голос — для голосу потрібен ключ Groq або OpenAI.")
+        return
+    llm.save_key(var, key)
+    context.user_data.pop("mode", None)
+    who = llm.NAMES.get(name, name)
+    if var == "STT_API_KEY":
+        await context.bot.send_message(msg.chat_id, f"✅ Ключ {who} для голосу збережено. Надішли голосове — перевіримо!")
+        return
+    text = f"✅ Ключ {who} збережено — тепер я розумію звичайні фрази."
+    if await llm.voice_available():
+        text += "\n🎙 Голос теж працює. Спробуй: «нагадай через 5 хвилин перевірити бота»."
+        await context.bot.send_message(msg.chat_id, text)
+    else:
+        context.user_data["mode"] = "await_stt"
+        await context.bot.send_message(msg.chat_id, text + "\n\n" + ASK_VOICE_KEY + "\n(Можна пропустити — /cancel.)",
+                                       parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 
 NO_LLM = ("🎙 Голос і вільний текст ще не працюють: у файлі <code>.env</code> бота не заданий ключ LLM.\n"
           "1. Візьми ключ будь-якої LLM: Groq (безкоштовно, з голосом) — https://console.groq.com/keys, "
           "або OpenAI, Anthropic, Gemini, OpenRouter, DeepSeek, Mistral, xAI.\n"
-          "2. Впиши в <code>.env</code>: <code>LLM_API_KEY=…</code> — провайдера бот визначить сам.\n"
-          "3. Перезапусти бота.\n"
+          "2. Надішли його сюди одним повідомленням (або команда /key) — провайдера я визначу сам.\n"
           "Поки що можна додавати покроково: /add")
 
 
@@ -366,6 +427,17 @@ async def free_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     msg = update.message
     chat_id = update.effective_chat.id
+    ud = context.user_data
+    # ключ, надісланий у чат (після /start, /key, /voicekey або просто вставлений, поки ключа немає)
+    if msg.text and not msg.text.startswith("/"):
+        waiting = ud.get("mode") if ud.get("mode") in ("await_key", "await_stt") else None
+        if waiting or (not llm.configured() and llm.looks_like_key(msg.text)):
+            if llm.looks_like_key(msg.text) or not llm.configured():
+                ud.pop("mode", None)
+                await handle_key(update, context, msg.text.strip(),
+                                 "STT_API_KEY" if waiting == "await_stt" else "LLM_API_KEY")
+                return
+            ud.pop("mode", None)  # ключ так і не надіслали — обробляємо як звичайну фразу
     if not llm.configured():
         await msg.reply_text(NO_LLM, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
         return
@@ -1552,10 +1624,12 @@ def build_app(persistence=None):
         name="add", persistent=persistence is not None,
     ))
     app.add_handler(CommandHandler(["start", "help"], start))
+    app.add_handler(CommandHandler("cancel", cancel))  # і поза діалогом /add: скасувати очікування ключа тощо
     app.add_handler(CommandHandler("list", list_cmd))
     app.add_handler(CommandHandler("all", all_cmd))
     app.add_handler(CommandHandler("today", today_cmd))
     app.add_handler(CommandHandler("nick", nick_cmd))
+    app.add_handler(CommandHandler(["key", "voicekey"], key_cmd))
     app.add_handler(CommandHandler(["tasks", "wishes", "birthdays", "holidays"], section_cmd))
     app.add_handler(CallbackQueryHandler(
         on_button, pattern=r"^(gift|congrats|snooze|snz30|snz60|snz120|snztm|snzw|snzm|done|skip|del|delok):\d+$|^rg:\d+:\d+$"))

@@ -12,7 +12,8 @@ import re
 
 import httpx
 
-from config import BASE_DIR, LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, LLM_PROVIDER, STT_API_KEY
+import config
+from config import BASE_DIR, LLM_BASE_URL, LLM_MODEL, LLM_PROVIDER
 
 log = logging.getLogger("reminder_bot.llm")
 
@@ -94,7 +95,7 @@ async def detect(key: str) -> str | None:
 
 
 def configured() -> bool:
-    return bool(LLM_API_KEY)
+    return bool(config.LLM_API_KEY)
 
 
 async def provider() -> str | None:
@@ -103,7 +104,7 @@ async def provider() -> str | None:
         return "custom"
     if LLM_PROVIDER:
         return LLM_PROVIDER
-    return await detect(LLM_API_KEY)
+    return await detect(config.LLM_API_KEY)
 
 
 def _endpoint(name: str):
@@ -138,7 +139,7 @@ async def chat_json(prompt: str):
     base, models = _endpoint(name)
     if not models:
         raise LLMError("для свого сервера вкажи LLM_MODEL у .env")
-    headers = {"Authorization": f"Bearer {LLM_API_KEY}", "User-Agent": UA}
+    headers = {"Authorization": f"Bearer {config.LLM_API_KEY}", "User-Agent": UA}
     async with httpx.AsyncClient(timeout=60) as client:
         for model in models:
             body = {"model": model, "messages": [{"role": "user", "content": prompt}],
@@ -157,7 +158,7 @@ async def chat_json(prompt: str):
             if r.status_code != 200:
                 log.error("LLM %s/%s: HTTP %s %s", name, model, r.status_code, r.text[:300])
                 if r.status_code in (401, 403) or (r.status_code == 400 and "api key" in r.text.lower()):
-                    raise LLMError(f"ключ {NAMES.get(name, name)} не підходить — перевір LLM_API_KEY у .env")
+                    raise LLMError(f"ключ {NAMES.get(name, name)} не підходить — заміни його командою /key")
                 if r.status_code == 404 and LLM_MODEL:
                     raise LLMError(f"модель «{LLM_MODEL}» не знайдена в {NAMES.get(name, name)} — перевір LLM_MODEL")
                 continue
@@ -167,7 +168,7 @@ async def chat_json(prompt: str):
 async def _anthropic(prompt: str) -> str:
     import anthropic  # тільки якщо обрано Anthropic
 
-    client = anthropic.AsyncAnthropic(api_key=LLM_API_KEY)
+    client = anthropic.AsyncAnthropic(api_key=config.LLM_API_KEY)
     try:
         resp = await client.messages.create(
             model=LLM_MODEL or PROVIDERS["anthropic"][1][0],
@@ -205,11 +206,11 @@ async def _stt_target():
     """(base_url, ключ, модель) для розпізнавання голосу або None."""
     name = await provider()
     if name in PROVIDERS and PROVIDERS[name][2] and name != "custom":
-        return PROVIDERS[name][0], LLM_API_KEY, PROVIDERS[name][2]
-    if STT_API_KEY:
-        stt = await detect(STT_API_KEY)
+        return PROVIDERS[name][0], config.LLM_API_KEY, PROVIDERS[name][2]
+    if config.STT_API_KEY:
+        stt = await detect(config.STT_API_KEY)
         if stt in PROVIDERS and PROVIDERS[stt][2]:
-            return PROVIDERS[stt][0], STT_API_KEY, PROVIDERS[stt][2]
+            return PROVIDERS[stt][0], config.STT_API_KEY, PROVIDERS[stt][2]
     return None
 
 
@@ -220,7 +221,7 @@ async def voice_available() -> bool:
 async def transcribe(audio: bytes, filename: str) -> str:
     target = await _stt_target()
     if not target:
-        raise LLMError("твій провайдер не розпізнає голос — додай у .env STT_API_KEY (ключ Groq, безкоштовно)")
+        raise LLMError("твій провайдер не розпізнає голос — надішли ключ Groq для голосу командою /voicekey (безкоштовно)")
     base, key, model = target
     async with httpx.AsyncClient(timeout=60) as client:
         r = await client.post(
@@ -233,3 +234,53 @@ async def transcribe(audio: bytes, filename: str) -> str:
         log.error("STT %s: %s", r.status_code, r.text[:300])
         raise LLMError("не вдалося розпізнати голос")
     return r.json().get("text", "").strip()
+
+
+# ---------- ключ із чату (/start, /key) ----------
+
+KEY_RE = re.compile(r"^(gsk_|sk-|AIza|xai-)[A-Za-z0-9_\-]{16,}$|^[A-Za-z0-9]{32}$")
+
+
+def looks_like_key(text: str) -> bool:
+    return bool(KEY_RE.match((text or "").strip()))
+
+
+async def check_key(key: str) -> tuple[str | None, str | None]:
+    """(провайдер, помилка): визначаємо провайдера й перевіряємо ключ справжнім запитом."""
+    key = key.strip()
+    name = await detect(key)
+    if not name:
+        return None, "не вдалося визначити, від якої LLM цей ключ"
+    if name == "anthropic":
+        import anthropic
+        try:
+            await anthropic.AsyncAnthropic(api_key=key).models.list()
+        except anthropic.AuthenticationError:
+            return name, "ключ Anthropic не підходить"
+        except anthropic.APIConnectionError:
+            return name, "немає з'єднання з Anthropic — спробуй ще раз"
+        except anthropic.APIStatusError as e:
+            return name, f"Anthropic відповів {e.status_code}"
+        return name, None
+    if not await _probe(name, key):
+        return name, f"ключ {NAMES.get(name, name)} не підходить (або сервіс недоступний)"
+    return name, None
+
+
+def has_voice(name: str | None) -> bool:
+    return bool(name in PROVIDERS and PROVIDERS[name][2])
+
+
+def save_key(var: str, key: str) -> None:
+    """Записує ключ у .env поруч із ботом і одразу застосовує (без перезапуску)."""
+    env = BASE_DIR / ".env"
+    lines = env.read_text(encoding="utf-8").splitlines() if env.exists() else []
+    drop = {var} | ({"GROQ_API_KEY"} if var == "LLM_API_KEY" else set())  # стара назва більше не потрібна
+    lines = [ln for ln in lines if ln.split("=", 1)[0].strip() not in drop]
+    lines.append(f"{var}={key.strip()}")
+    env.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    try:
+        env.chmod(0o600)
+    except OSError:
+        pass
+    setattr(config, var, key.strip())
