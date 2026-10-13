@@ -575,6 +575,10 @@ def ideas_line(pid) -> str | None:
     return ("💡 Ідеї: " + " · ".join(escape(i["text"]) for i in items)) if items else None
 
 
+def gift_occasion(occ) -> bool:
+    return bool(occ["needs_gift"]) or occ["kind"] in ("birthday", "anniversary")
+
+
 def occ_extras(occ):
     """Додаткові рядки й кнопки картки: ідеї/історія для ДР, отримувачі подарунків для свят."""
     lines, rows = [], []
@@ -590,7 +594,7 @@ def occ_extras(occ):
         for i in range(0, len(pending), 3):
             rows.append([InlineKeyboardButton(f"🎁 {cap(r['name'])}", callback_data=f"rg:{occ['id']}:{r['person_id']}")
                          for r in pending[i:i + 3]])
-    elif occ["person_id"]:
+    elif occ["person_id"] and gift_occasion(occ):  # ідеї подарунків — лише там, де дарують
         for line in (ideas_line(occ["person_id"]), gifts_line(occ["person_id"])):
             if line:
                 lines.append(line)

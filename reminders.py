@@ -189,7 +189,15 @@ def render(occ, today: date, key: str | None = None, extra_lines=(), extra_rows=
     elif occ["status"] == "done":
         lines.append("✅ зроблено")
 
-    return "\n".join(lines), keyboard(occ, days, extra_rows)
+    kb = keyboard(occ, days, extra_rows)
+    if advance(key) and not (occ["needs_gift"] or occ["needs_congrats"]):
+        kb = None  # «Завтра» / «Через N днів» — просто попередження; кнопки прийдуть у сам день
+    return "\n".join(lines), kb
+
+
+def advance(key: str | None) -> bool:
+    """Попереднє нагадування «за N днів» (d1, d3, d7…), а не в сам день."""
+    return bool(key) and key[0] == "d" and key[1:].isdigit() and int(key[1:]) > 0
 
 
 def keyboard(occ, days, extra_rows=()):

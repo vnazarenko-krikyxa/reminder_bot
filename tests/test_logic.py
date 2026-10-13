@@ -105,5 +105,22 @@ class Timed(unittest.TestCase):
         self.assertIsNone(decide(o, at(2026, 9, 24, 20, 31), {"at", key}))
 
 
+class AdvanceNotice(unittest.TestCase):
+    def card(self, key, **kw):
+        from reminders import render
+        o = occ("2026-10-14", **kw)
+        o.update(title="повезти малого до лікаря", year=2026, notes=None)
+        return render(o, date(2026, 10, 13), key)
+
+    def test_task_tomorrow_has_no_buttons(self):
+        text, kb = self.card("d1", gift=0, congrats=0)
+        self.assertIn("Завтра", text)
+        self.assertIsNone(kb)
+
+    def test_day_of_and_gift_keep_buttons(self):
+        self.assertIsNotNone(self.card(None, gift=0, congrats=0)[1])
+        self.assertIsNotNone(self.card("d1", gift=1, congrats=0)[1])
+
+
 if __name__ == "__main__":
     unittest.main()
