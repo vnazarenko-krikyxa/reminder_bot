@@ -37,6 +37,31 @@ class Cleanup(unittest.TestCase):
         self.assertEqual(line, "📌 <b>Позвонить мастеру</b>\n✅ Виконано 27.09 в 19:04")
         self.assertIsNotNone(eid)
 
+    def test_mark_done_by_phrase_and_undo(self):
+        import asyncio
+        import bot
+        today = datetime.now(TZ).date()
+        eid = db.add_event(1, "Зняти відео", today.day, today.month, today.year, "once", 0, 0, None,
+                           today, kind="task")
+        occ = db.active_occurrences()[0]
+        db.add_msg(occ["id"], 1, 200)
+        deleted, replies = [], []
+
+        class Bot:
+            async def delete_message(self, chat_id, message_id):
+                deleted.append(message_id)
+
+        async def reply(text, **kw):
+            replies.append((text, kw["reply_markup"].inline_keyboard[0][0].callback_data))
+
+        asyncio.run(bot.mark_done(Bot(), reply, 1, eid))
+        self.assertEqual(deleted, [200])                      # нагадування прибране з чату
+        self.assertEqual(db.list_events(1), [])               # разова справа закрита
+        self.assertIn("✅ Виконано", replies[0][0])
+        self.assertEqual(replies[0][1], f"undo:{eid}:{occ['id']}")
+        self.assertTrue(db.reopen(1, eid, occ["id"]))         # «↩️ Не те»
+        self.assertEqual(db.current_occurrence(1, eid)["id"], occ["id"])
+
     def test_yearly_done_keeps_event(self):
         today = datetime.now(TZ).date()
         db.add_event(1, "ДР мамы", 1, 10, None, "yearly", 1, 1, None, today, kind="birthday")

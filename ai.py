@@ -67,7 +67,10 @@ INTERPRET = """Ты помощник-напоминалка. Сейчас {now}.
 - добавить новое событие: {{"action": "add", "event": <событие>}}
 - изменить существующее: {{"action": "update", "event_id": <id>, "event": <событие целиком
   с учётом изменения; поля, о которых не говорили, скопируй из сохранённого без изменений>}}
-- удалить существующее: {{"action": "delete", "event_id": <id>}}
+- удалить существующее: {{"action": "delete", "event_id": <id>}} — только если просят удалить,
+  убрать, отменить, «не напоминай».
+- отметить выполненным событие из списка: {{"action": "done", "event_id": <id>}} — «… — готово»,
+  «сделал …», «купил …», «зробив», «виконано», «готово», «done». Выполненное — это done, НЕ delete.
 - сообщить об отсутствии на работе (пауза, начну позже, закончу раньше, отгул/выходной, больничный):
   {{"action": "absence", "absence": {{"kind": "pause"|"late_start"|"early_finish"|"day_off"|"sick",
     "date": "YYYY-MM-DD", "date_to": "YYYY-MM-DD"|null, "from": "HH:MM"|null, "to": "HH:MM"|null}}}}
@@ -122,7 +125,7 @@ INTERPRET = """Ты помощник-напоминалка. Сейчас {now}.
 «отмени созвон в 15», «перенеси митинг») — это meeting_change, даже если в списке выше есть похожее
 событие. delete/update для напоминаний — только когда сказано «напоминание» или речь явно о событии из списка
 (ДР, праздник, задача).
-Изменить/удалить можно только событие из списка выше: ищи по смыслу («мамин день рождения» = «ДР мамы»).
+Изменить/удалить/отметить выполненным можно только событие из списка выше: ищи по смыслу («мамин день рождения» = «ДР мамы»).
 «Не напоминай про …», «убери праздник …» — это delete соответствующего события из списка (праздники тоже там).
 Если подходит несколько событий — action "error" с их candidates.
 Дата не названа: для дня рождения/годовщины — action "error"; мечта или дело — можно без даты
@@ -132,7 +135,7 @@ INTERPRET = """Ты помощник-напоминалка. Сейчас {now}.
 {target}
 Фраза: {text}"""
 
-TARGET = """Пользователь сейчас правит событие id={id}: фраза относится к нему (update или delete)."""
+TARGET = """Пользователь сейчас правит событие id={id}: фраза относится к нему (update, delete или done)."""
 
 PARTIAL_FIX = """Пользователь ДОПОЛНЯЕТ или ИСПРАВЛЯЕТ ещё не выполненное действие "{action}": {data}
 Верни action "{action}" целиком с учётом фразы (что не упомянуто — оставь как было).
@@ -176,6 +179,9 @@ WEEKDAY_RE = [
 
 
 # Родные и друзья: встреча с ними — не рабочая (не ищем в каталоге компании)
+DELETE_RE = r"удал|видал|сотри|стери|прибер|убер|убрать|скасу|отмен|не нагадуй|не напоминай"
+DONE_RE = (r"готов|зроби|зробл|сделал|сделан|викона|выполн|купи[вл]|закінчи|законч|\bdone\b|"
+           r"відправи|отправил|подзвони|позвонил|оплати")
 PERSONAL_RE = (r"сем[ьея]|сім['’ʼ]?[юяї]|друз|друж[иб]|родн|рідн|батьк|родител|мам[аоуиі]|\bтат|пап[аоуи]|"
                r"жен[аоуые]\b|дружин|муж[аеу]?\b|чоловік|брат|сестр|дет[иь]|діт|бабус|дедус|дідус")
 
@@ -222,7 +228,7 @@ async def interpret(text: str, now: datetime, events: dict, target_id: int | Non
 
     events — {id: событие в формате черновика}. Возвращает один из вариантов:
     {"action": "add", "event": ev} · {"action": "update", "event_id": id, "event": ev}
-    · {"action": "delete", "event_id": id} · {"action": "error", "error": str, "candidates": [id]}
+    · {"action": "delete"|"done", "event_id": id} · {"action": "error", "error": str, "candidates": [id]}
     """
     stamp = f"{now:%Y-%m-%d %H:%M}, {WEEKDAYS[now.weekday()]}"
     cal = ", ".join(
@@ -259,6 +265,14 @@ async def interpret(text: str, now: datetime, events: dict, target_id: int | Non
         r = await _ask(prompt + f"\nНазванный день недели — сегодня, но имеется в виду следующий: {nxt.isoformat()}.",
                        lambda d: validate_action(d, now, events, draft is not None))
     r = fix_weekday(r, text, now)
+    if r["action"] in ("done", "delete"):
+        # модель плутає «видали» і «готово» — вирішує дієслово у фразі
+        low = text.lower()
+        deleting, finished = re.search(DELETE_RE, low), re.search(DONE_RE, low)
+        if deleting and not finished:
+            r["action"] = "delete"
+        elif finished and not deleting:
+            r["action"] = "done"
     if r["action"] == "agenda" and re.search(r"на (ближайшую |всю )?неделю|на 7 дней", text.lower()):
         # модель путает «на неделю» с «на этой неделе» — считаем 7 дней от сегодня
         r.update(date=now.date().isoformat(), date_to=(now.date() + timedelta(days=6)).isoformat())
@@ -344,12 +358,12 @@ def validate_action(d: dict, now: datetime, events: dict, draft_mode: bool) -> d
             return {"action": "error", "error": m["error"], "candidates": [],
                     "partial": {"action": "meeting", "data": d["meeting"]}}
         return {"action": "meeting", "meeting": m}
-    if action in ("update", "delete"):
+    if action in ("update", "delete", "done"):
         eid = int(d["event_id"])
         if eid not in events:
             return {"action": "error", "error": "не знайшов таку подію", "candidates": []}
-        if action == "delete":
-            return {"action": "delete", "event_id": eid}
+        if action in ("delete", "done"):
+            return {"action": action, "event_id": eid}
         ev = validate(d["event"], now)
         if "error" in ev:
             return {"action": "error", "error": ev["error"], "candidates": []}

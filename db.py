@@ -348,6 +348,26 @@ def get_occurrence(chat_id, occ_id):
         ).fetchone()
 
 
+def current_occurrence(chat_id, event_id):
+    """Найближчий невиконаний раз події (для «… — готово» голосом чи текстом)."""
+    with connect() as c:
+        return c.execute(
+            f"SELECT {OCC_COLS} FROM occurrences o JOIN events e ON e.id = o.event_id"
+            " WHERE o.event_id=? AND e.chat_id=? AND e.archived=0 AND o.status='active'"
+            " ORDER BY o.date LIMIT 1",
+            (event_id, chat_id),
+        ).fetchone()
+
+
+def reopen(chat_id, event_id, occ_id=None) -> bool:
+    """Скасувати помилкове «виконано»: подія знову активна, раз — теж."""
+    with connect() as c:
+        cur = c.execute("UPDATE events SET archived=0 WHERE id=? AND chat_id=?", (event_id, chat_id))
+        if cur.rowcount and occ_id:
+            c.execute("UPDATE occurrences SET status='active' WHERE id=? AND event_id=?", (occ_id, event_id))
+        return cur.rowcount > 0
+
+
 def update_occurrence(occ_id, **fields):
     cols = ", ".join(f"{k}=?" for k in fields)
     with connect() as c:

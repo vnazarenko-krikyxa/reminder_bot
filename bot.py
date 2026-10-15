@@ -553,6 +553,8 @@ async def free_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     parse_mode=ParseMode.HTML)
     elif r["action"] == "person_info":
         await reply(prefix + person_text(chat_id, r["person"]), parse_mode=ParseMode.HTML)
+    elif r["action"] == "done":
+        await mark_done(context.bot, reply, chat_id, r["event_id"], prefix)
     else:
         if r["action"] == "absence":
             r["absence"]["nick"] = db.get_setting(chat_id, "nick")  # свій ник у темі листа
@@ -1419,6 +1421,34 @@ async def finish_occurrence(bot, q, occ, status: str):
     db.pop_msgs(occ["id"])
 
 
+async def mark_done(bot, reply, chat_id, event_id, prefix=""):
+    """«Зняти відео — готово»: відмічаємо найближчий раз виконаним і прибираємо його нагадування з чату."""
+    occ = db.current_occurrence(chat_id, event_id)
+    e = occ or db.get_event(chat_id, event_id)
+    if occ:
+        db.complete_occurrence(chat_id, occ["id"], "done")
+        await cleanup_msgs(bot, occ["id"])
+    elif e and not e["archived"] and e["recurrence"] in ("once", "someday"):
+        db.archive_event(chat_id, event_id)  # справа чи бажання без дати
+    else:
+        await reply(f"{prefix}🤷 Зараз немає активного нагадування про це.", parse_mode=ParseMode.HTML)
+        return
+    undo = f"undo:{event_id}:{occ['id'] if occ else 0}"
+    await reply(prefix + done_line(e, "done", now()), parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Не те", callback_data=undo)]]))
+
+
+async def on_undo_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not allowed(update):
+        await q.answer()
+        return
+    _, eid, oid = q.data.split(":")
+    ok = db.reopen(update.effective_chat.id, int(eid), int(oid) or None)
+    await q.answer("↩️ Повернув у список" if ok else "Не знайдено")
+    await q.edit_message_text("↩️ Повернув у список — скажи, що саме виконано." if ok else "Не знайдено")
+
+
 # ---------- блоки: свята зранку, підсумок увечері ----------
 
 def holiday_block(chat_id, today: date):
@@ -1642,6 +1672,7 @@ def build_app(persistence=None):
     app.add_handler(CallbackQueryHandler(on_pending, pattern=r"^pend:(save|fix|cancel)$"))
     app.add_handler(CallbackQueryHandler(on_category, pattern=r"^cat:(task|wish)$"))
     app.add_handler(CallbackQueryHandler(on_wish_done, pattern=r"^wd:\d+$"))
+    app.add_handler(CallbackQueryHandler(on_undo_done, pattern=r"^undo:\d+:\d+$"))
     app.add_handler(CallbackQueryHandler(on_nodate, pattern=r"^(nodate|ndd):\d+$"))
     app.add_handler(CallbackQueryHandler(on_edit_event, pattern=r"^evedit:\d+$"))
     app.add_handler(CallbackQueryHandler(on_meeting_button, pattern=r"^(who:(\d+|x)|slot:\d+)$"))
