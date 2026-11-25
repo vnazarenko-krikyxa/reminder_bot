@@ -2,7 +2,7 @@ import os, sys, tempfile, unittest
 from datetime import date, datetime, timedelta
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-os.environ["DB_PATH"] = os.path.join(tempfile.mkdtemp(), "t.db")
+os.environ.setdefault("DB_PATH", os.path.join(tempfile.mkdtemp(), "t.db"))
 
 import db
 from config import TZ

@@ -9,6 +9,7 @@ import hashlib
 import json
 import logging
 import re
+import time
 
 import httpx
 
@@ -22,7 +23,7 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 
 # name: base_url (OpenAI-сумісний), моделі для розбору фраз, модель розпізнавання голосу (None — немає)
 PROVIDERS = {
-    "groq": ("https://api.groq.com/openai/v1", ["openai/gpt-oss-20b", "openai/gpt-oss-120b"],
+    "groq": ("https://api.groq.com/openai/v1", ["openai/gpt-oss-120b", "openai/gpt-oss-20b"],
              "whisper-large-v3-turbo"),
     "openai": ("https://api.openai.com/v1", ["gpt-4o-mini"], "whisper-1"),
     "anthropic": (None, ["claude-opus-5-5"], None),
@@ -121,8 +122,14 @@ def _retry_after(r: httpx.Response) -> float:
             return float(r.headers["retry-after"])
         except ValueError:
             pass
+    said = re.search(r"try again in (?:(\d+)h)?(?:(\d+)m)?([\d.]+)s", r.text)  # денний ліміт — лише в тексті
+    if said:
+        return int(said.group(1) or 0) * 3600 + int(said.group(2) or 0) * 60 + float(said.group(3))
     m = re.fullmatch(r"(?:(\d+)m)?([\d.]+)s", r.headers.get("x-ratelimit-reset-tokens", ""))
     return int(m.group(1) or 0) * 60 + float(m.group(2)) if m else 5.0
+
+
+COOLDOWN: dict[str, float] = {}  # модель -> коли знову можна (вичерпаний денний ліміт)
 
 
 async def chat_json(prompt: str):
@@ -142,6 +149,8 @@ async def chat_json(prompt: str):
     headers = {"Authorization": f"Bearer {config.LLM_API_KEY}", "User-Agent": UA}
     async with httpx.AsyncClient(timeout=60) as client:
         for model in models:
+            if COOLDOWN.get(model, 0) > time.monotonic() and model != models[-1]:
+                continue  # ліміт вичерпано надовго — одразу запасна модель
             body = {"model": model, "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0, "max_tokens": 1500, "response_format": {"type": "json_object"}}
             if "gpt-oss" in model:
@@ -149,7 +158,11 @@ async def chat_json(prompt: str):
             for attempt in range(2):
                 r = await client.post(f"{base}/chat/completions", headers=headers, json=body)
                 if r.status_code == 429 and attempt == 0:
-                    await asyncio.sleep(min(_retry_after(r), 20))
+                    wait = _retry_after(r)
+                    if wait > 20:  # денний ліміт — не чекаємо, беремо запасну модель
+                        COOLDOWN[model] = time.monotonic() + wait
+                        break
+                    await asyncio.sleep(wait)
                     continue
                 if r.status_code == 400 and "response_format" in r.text and "response_format" in body:
                     body.pop("response_format")  # не всі моделі підтримують JSON-режим — просимо промптом

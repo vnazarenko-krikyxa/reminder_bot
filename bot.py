@@ -2,6 +2,7 @@
 
 Интерфейс — украинский; названия событий — как их сказал пользователь.
 """
+import json
 import logging
 import warnings
 from datetime import date, datetime, timedelta
@@ -328,6 +329,27 @@ async def save_event(reply, update: Update, context: ContextTypes.DEFAULT_TYPE, 
 #   "fix" — виправлення картки, ["target", id] — правка події з /all, ["move", ev] — перенесення зустрічі,
 #   ["gift", occ_id, person_id] — відповідь на «Що подарував?», "partial_fix" — уточнення
 
+HISTORY_TTL = timedelta(hours=2)
+
+
+def recent_history(ud) -> list[str]:
+    """Останні репліки (до 2 годин тому) — щоб «і на завтра теж», «ні, о 6» розумілися в контексті."""
+    cutoff = now() - HISTORY_TTL
+    return [h["line"] for h in ud.get("history", []) if datetime.fromisoformat(h["at"]) >= cutoff]
+
+
+def remember(ud, text: str, r: dict, events: dict):
+    a = r["action"]
+    ev = r.get("event") or events.get(r.get("event_id")) or {}
+    what = {"add": "записав", "update": "змінив", "done": "відмітив виконаним", "delete": "запропонував видалити",
+            "error": "спитав", "meeting": "готую зустріч", "absence": "готую лист про відсутність"}.get(a, a)
+    detail = (r.get("error") if a == "error" else ev.get("title") or
+              ", ".join((r.get("meeting") or {}).get("attendees") or []) or "")
+    when = f" {ev.get('day')}.{ev.get('month')} {ev.get('time') or ''}" if ev.get("day") else ""
+    line = f"Пользователь: «{text[:200]}» → бот {what}: {detail}{when}".strip()
+    ud["history"] = ([h for h in ud.get("history", [])] + [{"at": now().isoformat(), "line": line}])[-4:]
+
+
 def event_summary(n: dict) -> list[str]:
     todo = [x for x, on in (("🎁 подарунок", n["needs_gift"]), ("💬 привітати", n["needs_congrats"])) if on]
     what = " + ".join(todo) if todo else "🔔 просто нагадати"
@@ -469,6 +491,7 @@ async def free_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_chat_action(msg.chat_id, "typing")
 
         mode = ud.pop("mode", None)
+        history = recent_history(ud)
         if isinstance(mode, list) and mode[0] == "gift":
             # відповідь на «Що подарував?»
             await record_gift(msg.reply_text, chat_id, mode[1], mode[2], text, heard)
@@ -493,7 +516,7 @@ async def free_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             r = await ai.interpret(text, now(), events, partial={"action": a, "data": pending[a]}, people=names)
         elif mode == "partial_fix" and partial:
             # відповідь на уточнення на кшталт «пауза з 14:00 — до котрої?» або «на котру годину?»
-            r = await ai.interpret(text, now(), events, partial=partial, people=names)
+            r = await ai.interpret(text, now(), events, partial=partial, people=names, history=history)
         elif mode == "fix" and pending and pending["action"] != "delete":
             # виправляємо картку: дія й подія лишаються тими ж, змінюються поля
             r = await ai.interpret(text, now(), events, draft=pending["event"])
@@ -501,14 +524,16 @@ async def free_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 r = {**pending, "event": r["event"]}
         else:
             target = mode[1] if isinstance(mode, list) and mode[0] == "target" and mode[1] in events else None
-            r = await ai.interpret(text, now(), events, target_id=target, people=names)
+            r = await ai.interpret(text, now(), events, target_id=target, people=names, history=history)
     except ai.AIError as e:
         await msg.reply_text(f"⚠️ {cap(str(e))}. Спробуй ще раз або /add.")
         return
 
+    log.info("Фраза: %r -> %s", text, json.dumps(r, ensure_ascii=False)[:400])
+    remember(ud, text, r, events)
     prefix = f"🎙 <i>{escape(heard)}</i>\n\n" if heard else ""
     if r["action"] == "error" and r.get("partial"):
-        ud["partial"] = r["partial"]
+        ud["partial"] = {**r["partial"], "question": r["error"]}
         ud["mode"] = "partial_fix"
         await msg.reply_text(f"{prefix}🤔 {escape(cap(r['error']))}", parse_mode=ParseMode.HTML)
         return
@@ -699,10 +724,16 @@ async def plan_meeting(reply, ud: dict, m: dict, picks: dict, prefix: str = ""):
     for name in names:
         idx = matches.get(name, [])
         if not idx:
-            ud["partial"] = {"action": "meeting", "data": m}
+            question = f"Не знайшов «{name}» у каталозі {WORK_EMAIL_FROM.split('@')[-1]}"
+            ud["partial"] = {"action": "meeting", "data": m, "question": question + " — прізвище або e-mail?"}
             ud["mode"] = "partial_fix"
-            await reply(f"{prefix}🤔 Не знайшов «{escape(name)}» у каталозі {WORK_EMAIL_FROM.split("@")[-1]}. Скажи прізвище або e-mail.",
-                        parse_mode=ParseMode.HTML)
+            ud["pending"] = {"action": "add", "event": ai.meeting_event(m, now())}
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton("📌 Записати як нагадування", callback_data="pend:save"),
+                InlineKeyboardButton("❌", callback_data="pend:cancel"),
+            ]])
+            await reply(f"{prefix}🤔 {escape(question)}. Скажи прізвище чи e-mail — або це не робоча зустріч?",
+                        parse_mode=ParseMode.HTML, reply_markup=kb)
             return
         if len(idx) > 1:
             options = [people[i] for i in idx[:8]]
